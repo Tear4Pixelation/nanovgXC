@@ -508,7 +508,7 @@ static void swnvg__blendWithFunc(NVGcompositeOperationState* op, unsigned char* 
   int dsta = dst[3];
   // nanovg's blend factors are for premultiplied color, as GL gets it (see nvg__compositeOperationState());
   //  rgba is not premultiplied
-  int src[3] = { (srca*COLOR0(rgba))/255, (srca*COLOR1(rgba))/255, (srca*COLOR2(rgba))/255 };
+  int src[3] = { int((srca*COLOR0(rgba))/255), int((srca*COLOR1(rgba))/255), int((srca*COLOR2(rgba))/255) };
   // multiply's blend factors (Painter::setCompOp()) leave out the S*(1 - Da) term, i.e. the source showing
   //  where dst is transparent; added here so multiply onto a transparent image does not vanish
   int multiply = op->srcRGB == NVG_DST_COLOR && op->dstRGB == NVG_ONE_MINUS_SRC_ALPHA;
