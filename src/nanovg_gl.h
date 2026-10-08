@@ -113,6 +113,14 @@ enum GLNVGrenderMethod {
   NVGL_RENDER_IMG_ATOMIC = 2
 };
 
+// fillMode bits past NVGpathFlags, for FB fetch, which blends in the shader rather than with glBlendFunc:
+//  the call's blend func is multiply or screen (as ulib's Painter::setCompOp() sets them).  Must match the
+//  fragment shader's defines.
+enum GLNVGblendFlags {
+  GLNVG_BLEND_MULTIPLY = 1 << 6,
+  GLNVG_BLEND_SCREEN = 1 << 7
+};
+
 #if NANOVG_GL_USE_UNIFORMBUFFER
 enum GLNVGuniformBindings {
   GLNVG_FRAG_BINDING = 0,
@@ -610,6 +618,9 @@ static int glnvg__renderCreate(void* uptr)
 \n  #define NVG_PATH_EVENODD 0x1
 \n  #define NVG_PATH_NO_AA 0x2
 \n  #define NVG_PATH_CONVEX 0x4
+\n  // GLNVGblendFlags
+\n  #define GLNVG_BLEND_MULTIPLY 0x40
+\n  #define GLNVG_BLEND_SCREEN 0x80
 \n
 \n  #ifdef USE_FRAMEBUFFER_FETCH
 \n  layout (location = 0) inout vec4 outColor;
@@ -871,6 +882,13 @@ static int glnvg__renderCreate(void* uptr)
 \n      //result = innerCol*pow(vec4(cov), vec4(1.5,1.5,1.5,0.5));
 \n    }
 \n  #ifdef USE_FRAMEBUFFER_FETCH
+\n    // premultiplied; multiply is the full formula (S*D + S*(1 - Da) + D*(1 - Sa)), screen S + D*(1 - S)
+\n    if((fillMode & GLNVG_BLEND_MULTIPLY) != 0)
+\n      outColor = vec4(result.rgb*(outColor.rgb + (1.0f - outColor.a)) + (1.0f - result.a)*outColor.rgb,
+\n          result.a + (1.0f - result.a)*outColor.a);
+\n    else if((fillMode & GLNVG_BLEND_SCREEN) != 0)
+\n      outColor = vec4(result.rgb + (1.0f - result.rgb)*outColor.rgb, result.a + (1.0f - result.a)*outColor.a);
+\n    else
 \n    outColor = result + (1.0f - result.a)*outColor;
 \n    //outColor.rgb = pow(pow(result.rgb, vec3(1.5/2.2)) + (1.0f - result.a)*pow(outColor.rgb, vec3(1.5/2.2)), vec3(2.2/1.5));
 \n    inoutWinding = winding;
@@ -1596,7 +1614,12 @@ static int glnvg__convertPaint(GLNVGcontext* gl, GLNVGcall* call, NVGpaint* pain
   GLNVGfragUniforms* frag = nvg__fragUniformPtr(gl, call->uniformOffset);
   memset(frag, 0, sizeof(*frag));
 
-  frag->fillMode = flags;  // NVGpathFlags
+  // the caller sets call->blendFunc first
+  if (call->blendFunc.srcRGB == GL_DST_COLOR && call->blendFunc.dstRGB == GL_ONE_MINUS_SRC_ALPHA)
+    flags |= GLNVG_BLEND_MULTIPLY;
+  else if (call->blendFunc.srcRGB == GL_ONE && call->blendFunc.dstRGB == GL_ONE_MINUS_SRC_COLOR)
+    flags |= GLNVG_BLEND_SCREEN;
+  frag->fillMode = flags;  // NVGpathFlags | GLNVGblendFlags
   frag->innerCol = glnvg__convertColor(gl, paint->innerColor);
   frag->outerCol = glnvg__convertColor(gl, paint->outerColor);
 

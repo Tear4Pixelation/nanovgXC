@@ -488,26 +488,41 @@ static int swnvg__getBlendFactor(int factor, int srca, int dsta)
   }
 }
 
+// factor for one color channel: src and dstc are that channel of the (premultiplied) source and of dst
+static int swnvg__getBlendFactorRGB(int factor, int srca, int dsta, int src, int dstc)
+{
+  switch(factor) {
+    case NVG_SRC_COLOR:           return src;
+    case NVG_ONE_MINUS_SRC_COLOR: return 255 - src;
+    case NVG_DST_COLOR:           return dstc;
+    case NVG_ONE_MINUS_DST_COLOR: return 255 - dstc;
+    default:                      return swnvg__getBlendFactor(factor, srca, dsta);
+  }
+}
+
 static void swnvg__blendWithFunc(NVGcompositeOperationState* op, unsigned char* dst, int cover, rgba32_t rgba, int linear)
 {
   // TODO: support linear blending
+  int i;
   int srca = (cover * COLOR3(rgba))/255;
   int dsta = dst[3];
-  // get blend factors
-  int srcRGB = swnvg__getBlendFactor(op->srcRGB, srca, dsta);
-  int dstRGB = swnvg__getBlendFactor(op->dstRGB, srca, dsta);
+  // nanovg's blend factors are for premultiplied color, as GL gets it (see nvg__compositeOperationState());
+  //  rgba is not premultiplied
+  int src[3] = { (srca*COLOR0(rgba))/255, (srca*COLOR1(rgba))/255, (srca*COLOR2(rgba))/255 };
+  // multiply's blend factors (Painter::setCompOp()) leave out the S*(1 - Da) term, i.e. the source showing
+  //  where dst is transparent; added here so multiply onto a transparent image does not vanish
+  int multiply = op->srcRGB == NVG_DST_COLOR && op->dstRGB == NVG_ONE_MINUS_SRC_ALPHA;
   int srcAlpha = swnvg__getBlendFactor(op->srcAlpha, srca, dsta);
   int dstAlpha = swnvg__getBlendFactor(op->dstAlpha, srca, dsta);
-  // blend
-  int r = (srcRGB*COLOR0(rgba) + dstRGB*dst[0])/255;
-  int g = (srcRGB*COLOR1(rgba) + dstRGB*dst[1])/255;
-  int b = (srcRGB*COLOR2(rgba) + dstRGB*dst[2])/255;
-  int a = (srcAlpha*srca + dstAlpha*dst[3])/255;
-  // write
-  dst[0] = (unsigned char)r;
-  dst[1] = (unsigned char)g;
-  dst[2] = (unsigned char)b;
-  dst[3] = (unsigned char)a;
+  for(i = 0; i < 3; ++i) {
+    int srcRGB = swnvg__getBlendFactorRGB(op->srcRGB, srca, dsta, src[i], dst[i]);
+    int dstRGB = swnvg__getBlendFactorRGB(op->dstRGB, srca, dsta, src[i], dst[i]);
+    int c = (srcRGB*src[i] + dstRGB*dst[i])/255;
+    if(multiply)
+      c += (src[i]*(255 - dsta))/255;
+    dst[i] = (unsigned char)swnvg__mini(c, 255);
+  }
+  dst[3] = (unsigned char)swnvg__mini((srcAlpha*srca + dstAlpha*dsta)/255, 255);
 }
 
 static void swnvg__scanlineSolid(unsigned char* dst, int count, unsigned char* cover, int x, int y, SWNVGcall* call)
