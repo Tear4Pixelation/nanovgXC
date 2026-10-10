@@ -208,6 +208,7 @@ struct GLNVGcontext {
   GLuint vertArr;  // VAO
   GLuint fragBuf;  // UBO
   GLuint texEdges;
+  int texEdgesLayers;  // layers allocated for texEdges
 
   float devicePixelRatio;
   int fragSize;
@@ -1057,7 +1058,24 @@ static void glnvg__renderFlush(void* uptr)
   int ntilelayers = gl->nedges/layersize + (gl->nedges % layersize != 0);
   glActiveTexture(GL_TEXTURE0 + 1);
   glBindTexture(GL_TEXTURE_2D_ARRAY, gl->texEdges);
-  glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, TILE_TEX_WIDTH, TILE_TEX_WIDTH, ntilelayers, 0, GL_RGBA, GL_FLOAT, gl->edges);
+  // (re)allocate storage only when it grows (to the CPU buffer's capacity, which is whole layers), then upload
+  //  only the rows holding edges - previously every frame re-specified the texture and uploaded whole 1 MB layers
+  if (ntilelayers > gl->texEdgesLayers) {
+    int nalloc = glnvg__maxi(ntilelayers, gl->cedges/layersize);
+    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, TILE_TEX_WIDTH, TILE_TEX_WIDTH, nalloc, 0, GL_RGBA, GL_FLOAT, NULL);
+    gl->texEdgesLayers = nalloc;
+  }
+  if (gl->nedges > 0) {
+    int nfull = gl->nedges/layersize;
+    int rem = gl->nedges - nfull*layersize;
+    if (nfull > 0)
+      glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, TILE_TEX_WIDTH, TILE_TEX_WIDTH, nfull, GL_RGBA, GL_FLOAT, gl->edges);
+    // partial last layer: whole rows (edge index -> texel is row-major, see shader); the tail of the last row is
+    //  within the CPU buffer (capacity is whole layers) and never read by the shader
+    if (rem > 0)
+      glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, nfull, TILE_TEX_WIDTH, (rem + TILE_TEX_WIDTH - 1)/TILE_TEX_WIDTH, 1,
+          GL_RGBA, GL_FLOAT, gl->edges + (size_t)nfull*layersize);
+  }
 
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, 0);
@@ -1074,6 +1092,8 @@ static void glnvg__renderFlush(void* uptr)
 #endif
   glnvg__checkError(gl, "renderFlush setup");
 
+  // uniform values persist in the program, so only set the per-call ints when they change
+  int curType = -1, curCount = -1, curOffset = -1;
   for (i = 0; i < gl->ncalls; i++) {
     GLNVGcall* call = &gl->calls[i];
     GLNVGblend* blend = &call->blendFunc;
@@ -1083,9 +1103,12 @@ static void glnvg__renderFlush(void* uptr)
     if(!prevblend || blend->srcRGB != prevblend->srcRGB || blend->srcAlpha != prevblend->srcAlpha
         || blend->dstRGB != prevblend->dstRGB || blend->dstAlpha != prevblend->dstAlpha)
       glnvg__blendFuncSeparate(gl, &call->blendFunc);
-    glUniform1i(gl->shader.loc[GLNVG_LOC_TYPE], call->fragType);
-    glUniform1i(gl->shader.loc[GLNVG_LOC_NEDGES], call->fillCount);  // will be zero except for GLNVG_FILL
-    glUniform1i(gl->shader.loc[GLNVG_LOC_OFFSET], call->fillOffset);  // avoid problems due to undef uniforms
+    if (i == 0 || call->fragType != curType)
+      glUniform1i(gl->shader.loc[GLNVG_LOC_TYPE], (curType = call->fragType));
+    if (i == 0 || call->fillCount != curCount)  // will be zero except for GLNVG_FILL
+      glUniform1i(gl->shader.loc[GLNVG_LOC_NEDGES], (curCount = call->fillCount));
+    if (i == 0 || call->fillOffset != curOffset)  // avoid problems due to undef uniforms
+      glUniform1i(gl->shader.loc[GLNVG_LOC_OFFSET], (curOffset = call->fillOffset));
     if (call->type == GLNVG_FILL)
       glDrawArrays(GL_TRIANGLE_STRIP, call->triangleOffset, call->triangleCount);
     else if (call->type == GLNVG_CONVEXFILL)

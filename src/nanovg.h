@@ -471,6 +471,11 @@ void nvgMoveTo(NVGcontext* ctx, float x, float y);
 // Adds line segment from the last point in the path to the specified point.
 void nvgLineTo(NVGcontext* ctx, float x, float y);
 
+// Appends npts points from xy (x0,y0, x1,y1, ... as doubles): a move-to for the first point if moveTo is
+//  nonzero, otherwise a line-to, then a line-to for each further point.  Same result as calling nvgMoveTo /
+//  nvgLineTo per point (each coordinate is rounded to float first), without the per-point call overhead.
+void nvgPolylined(NVGcontext* ctx, const double* xy, int npts, int moveTo);
+
 // Adds cubic bezier segment from last point in the path via two control points to the specified point.
 void nvgBezierTo(NVGcontext* ctx, float c1x, float c1y, float c2x, float c2y, float x, float y);
 

@@ -1329,11 +1329,42 @@ static void nvg__flattenPaths(NVGcontext* ctx)
       }
       i += 3;
       break;
-    case NVG_LINETO:
-      p = &ctx->commands[i+1];
-      nvg__addPoint(ctx, p[0], p[1]);  // note that p is not added if equal to previous point (w/in distTol)
-      i += 3;
+    case NVG_LINETO: {
+      // a run of LINETOs is the bulk of most paths: same as nvg__addPoint per point (a point is not added if
+      //  equal to the previous point w/in distTol), but with the lookups and capacity check hoisted
+      int k = i, n = 0, np, have;
+      float lx = 0, ly = 0, tol = ctx->distTol;
+      NVGpoint* pts;
+      while (k < ctx->ncommands && (int)ctx->commands[k] == NVG_LINETO) { k += 3; ++n; }
+      path = nvg__lastPath(ctx);
+      if (path == NULL) { i = k; break; }
+      if (cache->npoints+n > cache->cpoints) {
+        int cpoints = cache->npoints+n + cache->cpoints/2;
+        pts = (NVGpoint*)realloc(cache->points, sizeof(NVGpoint)*cpoints);
+        if (pts == NULL) { i = k; break; }
+        cache->points = pts;
+        cache->cpoints = cpoints;
+      }
+      pts = cache->points;
+      np = cache->npoints;
+      have = path->count > 0 && np > 0;
+      if (have) { lx = pts[np-1].x; ly = pts[np-1].y; }
+      for (; i < k; i += 3) {
+        float x = ctx->commands[i+1], y = ctx->commands[i+2];
+        if (have) {
+          float dx = x - lx, dy = y - ly;
+          if (dx*dx + dy*dy < tol*tol) continue;
+        }
+        pts[np].x = x;
+        pts[np].y = y;
+        ++np;
+        path->count++;
+        lx = x; ly = y;
+        have = 1;
+      }
+      cache->npoints = np;
       break;
+    }
     case NVG_BEZIERTO:
       last = nvg__lastPoint(ctx);
       if (last != NULL) {
@@ -1394,9 +1425,22 @@ static void nvg__flattenPaths(NVGcontext* ctx)
   // this is where we could store or print area info, i.e. bbox area/sum(polyArea) = overdraw ratio
 }
 
-static void nvg__calcBounds(NVGcontext* ctx)
+// clip bounds to scissor
+static void nvg__clipBounds(NVGcontext* ctx)
 {
   NVGstate* state = nvg__getState(ctx);
+  NVGpathCache* cache = ctx->cache;
+  if (state->scissor.extent[0] >= 0) {
+    cache->bounds[0] = nvg__maxf(cache->bounds[0], state->scissorBounds[0]);
+    cache->bounds[1] = nvg__maxf(cache->bounds[1], state->scissorBounds[1]);
+    cache->bounds[2] = nvg__minf(cache->bounds[2], state->scissorBounds[2]);
+    cache->bounds[3] = nvg__minf(cache->bounds[3], state->scissorBounds[3]);
+  }
+}
+
+// used for strokes only - nvg__expandFill computes fill bounds itself
+static void nvg__calcBounds(NVGcontext* ctx)
+{
   NVGpathCache* cache = ctx->cache;
   int i,j;
   cache->bounds[0] = cache->bounds[1] = 1e6f;
@@ -1419,13 +1463,7 @@ static void nvg__calcBounds(NVGcontext* ctx)
     cache->bounds[2] = nvg__maxf(cache->bounds[2], path->bounds[2]);
     cache->bounds[3] = nvg__maxf(cache->bounds[3], path->bounds[3]);
   }
-  // clip bounds to scissor
-  if (state->scissor.extent[0] >= 0) {
-    cache->bounds[0] = nvg__maxf(cache->bounds[0], state->scissorBounds[0]);
-    cache->bounds[1] = nvg__maxf(cache->bounds[1], state->scissorBounds[1]);
-    cache->bounds[2] = nvg__minf(cache->bounds[2], state->scissorBounds[2]);
-    cache->bounds[3] = nvg__minf(cache->bounds[3], state->scissorBounds[3]);
-  }
+  nvg__clipBounds(ctx);
 }
 
 static int nvg__curveDivs(float r, float arc, float tol)
@@ -1739,6 +1777,8 @@ static int nvg__expandFill(NVGcontext* ctx)  //, float w, int lineJoin, float mi
   verts = nvg__allocTempVerts(ctx, csegs);
   if (verts == NULL) return 0;
 
+  cache->bounds[0] = cache->bounds[1] = 1e6f;
+  cache->bounds[2] = cache->bounds[3] = -1e6f;
   // if path is explicitly closed, nvg__flattenPaths removes last point and sets path->closed - so for fill
   //  we always add the closing segment
   for (i = 0; i < cache->npaths; i++) {
@@ -1746,12 +1786,24 @@ static int nvg__expandFill(NVGcontext* ctx)  //, float w, int lineJoin, float mi
     NVGpoint* p1 = &cache->points[path->first];
     NVGpoint* p0 = p1 + (path->count - 1);
 
+    // bounds accumulated here rather than in a separate nvg__calcBounds pass: fill vertex j ends at point j, so
+    //  this is the same min/max over the same values in the same order
+    float b0 = 1e6f, b1 = 1e6f, b2 = -1e6f, b3 = -1e6f;
     path->fill = verts;
     for (j = 0; j < path->count; ++j) {
       nvg__segment(verts++, p0->x, p0->y, p1->x, p1->y);
+      b0 = nvg__minf(b0, p1->x);
+      b1 = nvg__minf(b1, p1->y);
+      b2 = nvg__maxf(b2, p1->x);
+      b3 = nvg__maxf(b3, p1->y);
       p0 = p1++;
     }
     path->nfill = (int)(verts - path->fill);
+    path->bounds[0] = b0; path->bounds[1] = b1; path->bounds[2] = b2; path->bounds[3] = b3;
+    cache->bounds[0] = nvg__minf(cache->bounds[0], b0);
+    cache->bounds[1] = nvg__minf(cache->bounds[1], b1);
+    cache->bounds[2] = nvg__maxf(cache->bounds[2], b2);
+    cache->bounds[3] = nvg__maxf(cache->bounds[3], b3);
   }
   // determine if path can be drawn as a single triangle fan from first point (non-AA paths only)
   // should we assume a path with many points is unlikely to be convex?: cache->paths[0].nfill < 16
@@ -1787,6 +1839,40 @@ void nvgLineTo(NVGcontext* ctx, float x, float y)
 {
   float vals[] = { NVG_LINETO, x, y };
   nvg__appendCommands(ctx, vals, NVG_COUNTOF(vals));
+}
+
+// bulk version of nvgMoveTo/nvgLineTo; must give bit-identical commands: coordinates rounded to float, then
+//  transformed with the same expression as nvgTransformPoint; commandx/y = last untransformed point
+void nvgPolylined(NVGcontext* ctx, const double* xy, int npts, int moveTo)
+{
+  NVGstate* state = nvg__getState(ctx);
+  const float* t = state->xform;
+  float t0 = t[0], t1 = t[1], t2 = t[2], t3 = t[3], t4 = t[4], t5 = t[5];
+  float x = 0, y = 0;
+  float* dst;
+  int i, nvals = 3*npts;
+
+  if (npts <= 0) return;
+  if (ctx->ncommands+nvals > ctx->ccommands) {
+    float* commands;
+    int ccommands = ctx->ncommands+nvals + ctx->ccommands/2;
+    commands = (float*)realloc(ctx->commands, sizeof(float)*ccommands);
+    if (commands == NULL) return;
+    ctx->commands = commands;
+    ctx->ccommands = ccommands;
+  }
+
+  dst = &ctx->commands[ctx->ncommands];
+  for (i = 0; i < npts; ++i, dst += 3) {
+    x = (float)xy[2*i];
+    y = (float)xy[2*i+1];
+    dst[0] = (i == 0 && moveTo) ? NVG_MOVETO : NVG_LINETO;
+    dst[1] = x*t0 + y*t2 + t4;
+    dst[2] = x*t1 + y*t3 + t5;
+  }
+  ctx->commandx = x;
+  ctx->commandy = y;
+  ctx->ncommands += nvals;
 }
 
 void nvgBezierTo(NVGcontext* ctx, float c1x, float c1y, float c2x, float c2y, float x, float y)
@@ -2027,8 +2113,10 @@ void nvgFill(NVGcontext* ctx)
   fillPaint.outerColor.a *= state->alpha;
 
   nvg__flattenPaths(ctx);
-  nvg__expandFill(ctx);
-  nvg__calcBounds(ctx);
+  if (nvg__expandFill(ctx))  // also computes bounds
+    nvg__clipBounds(ctx);
+  else
+    nvg__calcBounds(ctx);
 
   ctx->params.renderFill(ctx->params.userPtr, &fillPaint, state->compositeOperation, &state->scissor, flags,
       ctx->cache->bounds, ctx->cache->paths, ctx->cache->npaths);
