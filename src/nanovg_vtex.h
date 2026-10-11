@@ -208,7 +208,6 @@ struct GLNVGcontext {
   GLuint vertArr;  // VAO
   GLuint fragBuf;  // UBO
   GLuint texEdges;
-  int texEdgesLayers;  // layers allocated for texEdges
 
   float devicePixelRatio;
   int fragSize;
@@ -1058,24 +1057,12 @@ static void glnvg__renderFlush(void* uptr)
   int ntilelayers = gl->nedges/layersize + (gl->nedges % layersize != 0);
   glActiveTexture(GL_TEXTURE0 + 1);
   glBindTexture(GL_TEXTURE_2D_ARRAY, gl->texEdges);
-  // (re)allocate storage only when it grows (to the CPU buffer's capacity, which is whole layers), then upload
-  //  only the rows holding edges - previously every frame re-specified the texture and uploaded whole 1 MB layers
-  if (ntilelayers > gl->texEdgesLayers) {
-    int nalloc = glnvg__maxi(ntilelayers, gl->cedges/layersize);
-    glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, TILE_TEX_WIDTH, TILE_TEX_WIDTH, nalloc, 0, GL_RGBA, GL_FLOAT, NULL);
-    gl->texEdgesLayers = nalloc;
-  }
-  if (gl->nedges > 0) {
-    int nfull = gl->nedges/layersize;
-    int rem = gl->nedges - nfull*layersize;
-    if (nfull > 0)
-      glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, 0, TILE_TEX_WIDTH, TILE_TEX_WIDTH, nfull, GL_RGBA, GL_FLOAT, gl->edges);
-    // partial last layer: whole rows (edge index -> texel is row-major, see shader); the tail of the last row is
-    //  within the CPU buffer (capacity is whole layers) and never read by the shader
-    if (rem > 0)
-      glTexSubImage3D(GL_TEXTURE_2D_ARRAY, 0, 0, 0, nfull, TILE_TEX_WIDTH, (rem + TILE_TEX_WIDTH - 1)/TILE_TEX_WIDTH, 1,
-          GL_RGBA, GL_FLOAT, gl->edges + (size_t)nfull*layersize);
-  }
+  // when all edges fit in one layer (most frames), specify only the rows holding edges rather than the whole
+  //  1 MB layer: edgeFetch never reads a row >= nedges/TILE_TEX_WIDTH.  Keep re-specifying the texture with its
+  //  data every flush: allocating once and updating with glTexSubImage3D (in place or after a NULL orphan) was
+  //  measured ~2x slower on frames with many edges/flushes (driver syncs/clears), see docs/agent/pen-and-tools.md
+  int texrows = ntilelayers > 1 ? TILE_TEX_WIDTH : (gl->nedges + TILE_TEX_WIDTH - 1)/TILE_TEX_WIDTH;
+  glTexImage3D(GL_TEXTURE_2D_ARRAY, 0, GL_RGBA32F, TILE_TEX_WIDTH, texrows, ntilelayers, 0, GL_RGBA, GL_FLOAT, gl->edges);
 
   glActiveTexture(GL_TEXTURE0);
   glBindTexture(GL_TEXTURE_2D, 0);
